@@ -1,0 +1,84 @@
+# Importing packages
+import dxpy
+import dxdata
+import pandas as pd
+import pyspark
+
+# Automatically discover and assign the dataset ID, then load the dataset
+dispensed_dataset_id = dxpy.find_one_data_object(typename='Dataset', name='app*.dataset', folder='/', name_mode='glob')['id']
+dataset = dxdata.load_dataset(id=dispensed_dataset_id)
+
+# Spark initialization (run only once unless the kernel is restarted)
+sc = pyspark.SparkContext()
+spark = pyspark.sql.SparkSession(sc)
+
+# Access the participant entity
+participant = dataset['participant']
+
+# This function is used to fetch all field names for a list of field IDs (e.g. "p<field_id>_iYYY_aZZZ")
+def field_names_for_ids(field_ids):
+    from distutils.version import LooseVersion
+    fields = []
+    for field_id in field_ids:
+        field_id = 'p' + str(field_id)
+        fields += participant.find_fields(name_regex=r'^{}(_i\d+)?(_a\d+)?$'.format(field_id))
+    return sorted([field.name for field in fields], key=lambda n: LooseVersion(n))
+
+field_ids = ['31', '21022', '22000', '54', '22009', '22001', '22006', '22019', '22021', '22027']
+field_names = ['eid'] + field_names_for_ids(field_ids)
+
+# Connect to Spark and convert to Pandas DataFrame
+df = participant.retrieve_fields(names=field_names, engine=dxdata.connect())
+pdf = df.toPandas()
+
+# Initial Sample Size
+print(f"Initial number of samples: {len(pdf)}")
+
+#Genetic data was successfully obtained 
+pdf_qced = pdf[~pdf['p22000'].isnull()]
+print(f"Genetic data was successfully obtained in 'p22000': {len(pdf_qced)}")
+
+# Filter where sex and genetic sex are the same
+pdf_qced = pdf_qced[pdf_qced['p31'] == pdf_qced['p22001']]
+print(f"After filtering for matching sex and genetic sex: {len(pdf_qced)}")
+
+# Not Sex chromosome aneuploidy
+pdf_qced = pdf_qced[pdf_qced['p22019'].isnull()]
+print(f"After filtering out sex chromosome aneuploidy: {len(pdf_qced)}")
+
+# Not het_missing_outliers
+pdf_qced = pdf_qced[pdf_qced['p22027'].isnull()]
+print(f"After filtering out het missing outliers: {len(pdf_qced)}")
+
+# in_white_british_ancestry_subset
+pdf_qced = pdf_qced[pdf_qced['p22006'] == 1]
+print(f"After filtering for white British ancestry subset: {len(pdf_qced)}")
+
+# Filtering rows based on 'p22021' values for "Maximal unrelated subset"
+valid_values = [-1, 0, 1]
+pdf_qced = pdf_qced[pdf_qced['p22021'].isin(valid_values)]
+print(f"After selecting the maximal unrelated subset: {len(pdf_qced)}")
+
+import pandas as pd
+import re
+
+def transform_name(name):
+    if name == 'eid':
+        return 'userId'
+    else:
+        base = re.search('p(\d+)', name).group(1)
+        instance_match = re.search('_i(\d+)', name)
+        array_match = re.search('_a(\d+)', name)
+        
+        instance = int(instance_match.group(1)) if instance_match else 0
+        array = int(array_match.group(1)) if array_match else 0
+        
+        return f'x{base}_{instance}_{array}'
+
+pdf_qced.columns = [transform_name(col) for col in pdf_qced.columns]
+
+pdf_qced.to_csv('QC_data.csv', na_rep='NaN', index=False, quoting=3)
+
+%%bash
+dx upload QC_data.csv -p --path /QC_data/ --brief
+
